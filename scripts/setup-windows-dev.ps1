@@ -37,8 +37,13 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 
 # `winget list --id X --exact` exits non-zero when the package is absent.
 # Output is discarded; only the exit code is read.
+# `--source winget` on every call: without it winget also queries the
+# Microsoft Store source, which on a fresh Windows 11 install failed with
+# 0x8a15005e "The server certificate did not match any of the expected
+# values" and turned every install into "Search failed". Nothing here comes
+# from the Store.
 function Test-WingetPackage($id) {
-    winget list --id $id --exact --accept-source-agreements *> $null
+    winget list --id $id --exact --source winget --accept-source-agreements *> $null
     return ($LASTEXITCODE -eq 0)
 }
 
@@ -48,7 +53,7 @@ function Install-WingetPackage($id, $label, [string[]]$extraArgs = @()) {
         return
     }
     Write-Host "Installing $label ($id)..."
-    $wingetArgs = @('install', '--id', $id, '--exact', '--silent',
+    $wingetArgs = @('install', '--id', $id, '--exact', '--silent', '--source', 'winget',
         '--accept-package-agreements', '--accept-source-agreements') + $extraArgs
     & winget @wingetArgs
     # winget returns non-zero for "already installed, no upgrade available"

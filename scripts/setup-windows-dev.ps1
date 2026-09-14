@@ -67,9 +67,41 @@ function Install-WingetPackage($id, $label, [string[]]$extraArgs = @()) {
 # 1. Visual Studio 2022 Build Tools with the C++ workload. Without
 #    --override the installer adds only the bare shell, with no compiler
 #    and no linker, and the Rust build fails at the first link.
+#
+#    The VCTools workload carries only the x86 and x64 compilers. On an ARM64
+#    machine (a Windows 11 VM on Apple Silicon) rustup picks
+#    aarch64-pc-windows-msvc, and the build failed with "linker `link.exe`
+#    not found" because no ARM64 linker was installed. Clang is added there
+#    too, for aws-lc-sys's ARM64 build.
+$isArm64 = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
+$vsComponents = '--add Microsoft.VisualStudio.Workload.VCTools'
+if ($isArm64) {
+    $vsComponents += ' --add Microsoft.VisualStudio.Component.VC.Tools.ARM64' +
+        ' --add Microsoft.VisualStudio.Component.VC.Llvm.Clang' +
+        ' --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset'
+}
 Install-WingetPackage 'Microsoft.VisualStudio.2022.BuildTools' 'Visual Studio 2022 Build Tools (C++ workload)' @(
-    '--override', '--wait --quiet --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+    '--override', "--wait --quiet --norestart $vsComponents --includeRecommended"
 )
+
+# winget skips a Build Tools that is already installed, --override and all, so
+# an earlier install without the ARM64 compilers stayed without them. Ask
+# vswhere, and modify the existing install when the component is missing.
+if ($isArm64) {
+    $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+    $vswhere = Join-Path $installer 'vswhere.exe'
+    $hasArm64 = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+    if (-not $hasArm64) {
+        $buildTools = & $vswhere -products * -property installationPath | Select-Object -First 1
+        if ($buildTools) {
+            Write-Host "Adding the ARM64 compilers to $buildTools..."
+            Start-Process -Wait -Verb RunAs (Join-Path $installer 'setup.exe') -ArgumentList "modify --installPath `"$buildTools`" $vsComponents --includeRecommended --quiet --wait --norestart"
+        }
+        $hasArm64 = & $vswhere -products * -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+        if (-not $hasArm64) { Write-Error "The ARM64 MSVC compilers are still missing after installing Build Tools." }
+    }
+    Write-Step "ARM64 MSVC compilers present"
+}
 
 # 2. CMake and NASM.
 Install-WingetPackage 'Kitware.CMake' 'CMake'

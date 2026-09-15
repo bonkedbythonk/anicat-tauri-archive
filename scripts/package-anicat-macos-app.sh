@@ -59,10 +59,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Anicat</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- The full version, -beta.N included, so About, the log header and a
+         copied bug report all say a test build is one. CFBundleVersion stays
+         numeric: LaunchServices orders bundles by it. -->
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
+    <string>${VERSION%%-*}</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIconName</key>

@@ -27,9 +27,12 @@ public enum UpdateChecker {
     }
 
     /// Drafts and pre-releases are excluded by `/releases/latest` itself,
-    /// which is why `publish-release.sh` may create drafts freely without
-    /// every install being told about them.
+    /// which is why `publish-release.sh` may create drafts and test builds
+    /// freely without every stable install being told about them.
     static let endpoint = URL(string: "https://api.github.com/repos/bonkedbythonk/anicat/releases/latest")!
+    /// The test line's view: every published release, pre-releases included,
+    /// newest first. Read only by a build that is itself a pre-release.
+    static let listEndpoint = URL(string: "https://api.github.com/repos/bonkedbythonk/anicat/releases?per_page=20")!
 
     /// Not checked more than once a day. A launch is not a reason to spend a
     /// request, and GitHub rate-limits unauthenticated callers by IP -- which
@@ -67,32 +70,56 @@ public enum UpdateChecker {
             .flatMap { $0.isEmpty ? nil : $0 }
     }
 
-    /// Compares dotted numeric versions without `import` of anything.
+    /// Compares versions without `import` of anything.
     ///
     /// Not a string compare: "6.10.0" sorts before "6.9.0" lexically, so a
     /// tenth minor release would have read as older than the ninth and
     /// nobody would have been told about it. Missing components count as
     /// zero, so "6.1" and "6.1.0" are the same version.
+    ///
+    /// A `-beta.N` suffix is a pre-release and ranks below the same version
+    /// without one, as in semver. Stripping it like build metadata made
+    /// "6.1.0-beta.2" equal to "6.1.0-beta.1", so a tester was never told
+    /// about the second beta, nor about 6.1.0 itself once it shipped.
     public static func isNewer(_ candidate: String, than current: String) -> Bool {
-        func parts(_ s: String) -> [Int] {
-            // Anything after a `-` or `+` is build metadata, not precedence.
-            let core = s.split(whereSeparator: { $0 == "-" || $0 == "+" }).first.map(String.init) ?? s
-            return core.split(separator: ".").map { Int($0.filter(\.isNumber)) ?? 0 }
+        func split(_ s: String) -> (core: [Int], pre: [Substring]) {
+            // Anything after a `+` is build metadata, not precedence.
+            let noMeta = s.split(separator: "+", maxSplits: 1).first ?? Substring(s)
+            let halves = noMeta.split(separator: "-", maxSplits: 1)
+            let core = (halves.first ?? "").split(separator: ".").map { Int($0.filter(\.isNumber)) ?? 0 }
+            let pre = halves.count > 1 ? halves[1].split(separator: ".") : []
+            return (core, pre)
         }
-        let a = parts(candidate), b = parts(current)
-        for i in 0..<max(a.count, b.count) {
-            let l = i < a.count ? a[i] : 0
-            let r = i < b.count ? b[i] : 0
+        let a = split(candidate), b = split(current)
+        for i in 0..<max(a.core.count, b.core.count) {
+            let l = i < a.core.count ? a.core[i] : 0
+            let r = i < b.core.count ? b.core[i] : 0
             if l != r { return l > r }
         }
+        if a.pre.isEmpty || b.pre.isEmpty { return a.pre.isEmpty && !b.pre.isEmpty }
+        for i in 0..<max(a.pre.count, b.pre.count) {
+            guard i < a.pre.count else { return false }
+            guard i < b.pre.count else { return true }
+            let l = a.pre[i], r = b.pre[i]
+            if l == r { continue }
+            if let li = Int(l), let ri = Int(r) { return li > ri }
+            return l > r
+        }
         return false
+    }
+
+    /// Whether this build is a pre-release, i.e. its version carries a `-`
+    /// suffix. Such a build was installed on purpose from the test line and
+    /// is offered newer test builds as well as stable ones.
+    static func isPrerelease(_ version: String) -> Bool {
+        (version.split(separator: "+", maxSplits: 1).first ?? "").contains("-")
     }
 
     /// `nil` on any failure at all -- no network, rate limited, a repository
     /// with no releases yet. An update check that cannot reach GitHub is not
     /// something to interrupt anyone about.
-    public static func latestRelease() async -> Release? {
-        var request = URLRequest(url: endpoint)
+    public static func latestRelease(includingPrereleases: Bool = false) async -> Release? {
+        var request = URLRequest(url: includingPrereleases ? listEndpoint : endpoint)
         // GitHub asks for an explicit Accept and rejects an empty User-Agent.
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Anicat/\(currentVersion)", forHTTPHeaderField: "User-Agent")
@@ -100,14 +127,27 @@ public enum UpdateChecker {
 
         guard let (data, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let tag = json["tag_name"] as? String,
-              let page = (json["html_url"] as? String).flatMap(URL.init(string:))
+              let json = try? JSONSerialization.jsonObject(with: data)
         else { return nil }
 
-        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        let notes = (json["body"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        return Release(version: version, pageURL: page, notes: notes)
+        let objects: [[String: Any]]
+        if includingPrereleases {
+            objects = (json as? [[String: Any]] ?? []).filter { ($0["draft"] as? Bool) != true }
+        } else {
+            objects = (json as? [String: Any]).map { [$0] } ?? []
+        }
+        let releases: [Release] = objects.compactMap { json in
+            guard let tag = json["tag_name"] as? String,
+                  let page = (json["html_url"] as? String).flatMap(URL.init(string:))
+            else { return nil }
+            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            let notes = (json["body"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            return Release(version: version, pageURL: page, notes: notes)
+        }
+        // Highest version, not the first in the list: GitHub orders by
+        // creation date, and a stable patch cut after a beta of the next
+        // minor would otherwise hide that beta from its own testers.
+        return releases.max { isNewer($1.version, than: $0.version) }
     }
 
     /// The newer release, or nil when this build is current. `force` skips
@@ -123,7 +163,7 @@ public enum UpdateChecker {
         let running = ProcessInfo.processInfo.environment["ANICAT_FAKE_VERSION"]
             .flatMap { $0.isEmpty ? nil : $0 } ?? bundleVersion
         guard let running else { return nil }
-        guard let release = await latestRelease() else { return nil }
+        guard let release = await latestRelease(includingPrereleases: isPrerelease(running)) else { return nil }
         defaults.set(Date().timeIntervalSince1970, forKey: lastCheckKey)
         guard isNewer(release.version, than: running) else { return nil }
         return release

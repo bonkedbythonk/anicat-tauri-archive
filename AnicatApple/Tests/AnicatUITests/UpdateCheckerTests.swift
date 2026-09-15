@@ -42,6 +42,24 @@ struct UpdateCheckerTests {
         #expect(UpdateChecker.isNewer("6.1.0", than: "6.0.0+dirty"))
     }
 
+    @Test("A pre-release ranks below its release and above the one before")
+    func prereleaseOrdering() {
+        #expect(UpdateChecker.isNewer("6.1.0", than: "6.1.0-beta.2"))
+        #expect(!UpdateChecker.isNewer("6.1.0-beta.2", than: "6.1.0"))
+        #expect(UpdateChecker.isNewer("6.1.0-beta.1", than: "6.0.1"))
+        #expect(UpdateChecker.isNewer("6.1.0-beta.2", than: "6.1.0-beta.1"))
+        #expect(UpdateChecker.isNewer("6.1.0-beta.10", than: "6.1.0-beta.9"))
+        #expect(!UpdateChecker.isNewer("6.1.0-beta.1", than: "6.1.0-beta.1"))
+        #expect(UpdateChecker.isNewer("6.1.0-beta.1", than: "6.1.0-beta"))
+    }
+
+    @Test("Only a dash before the metadata marks a pre-release")
+    func prereleaseDetection() {
+        #expect(UpdateChecker.isPrerelease("6.1.0-beta.1"))
+        #expect(!UpdateChecker.isPrerelease("6.1.0"))
+        #expect(!UpdateChecker.isPrerelease("6.1.0+dirty-tree"))
+    }
+
     @Test("The shipped tag format parses")
     func tagsFromPublishReleaseParse() {
         // publish-release.sh tags `v$VERSION`; the checker strips the v

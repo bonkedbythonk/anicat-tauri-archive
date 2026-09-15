@@ -2,7 +2,6 @@
 # bump-version.sh — Single source of truth for version bumps.
 #
 # Usage:  bash scripts/bump-version.sh 5.9.0
-#         bash scripts/bump-version.sh 6.1.0-beta.1   (a test build)
 #
 # Updates version.txt (canonical), core/Cargo.toml and the iOS target's
 # CFBundleShortVersionString. The macOS .app packaging scripts read
@@ -14,18 +13,13 @@ set -euo pipefail
 
 NEW_VERSION="${1:-}"
 
-if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$'; then
-    echo "Usage: $0 <MAJOR.MINOR.PATCH>[-beta.N]"
-    echo "  e.g. $0 5.8.1         (bug fix)"
-    echo "       $0 5.9.0         (new feature)"
-    echo "       $0 6.0.0         (breaking change)"
-    echo "       $0 6.1.0-beta.1  (test build; published as a GitHub pre-release)"
+if ! echo "$NEW_VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "Usage: $0 <MAJOR.MINOR.PATCH>"
+    echo "  e.g. $0 5.8.1  (bug fix)"
+    echo "       $0 5.9.0  (new feature)"
+    echo "       $0 6.0.0  (breaking change)"
     exit 1
 fi
-# Apple defines CFBundleShortVersionString as up to three integers, and the
-# iPhone build goes through xcodebuild's validation, so it carries the version
-# without its -beta.N suffix. No test .ipa is published anyway.
-NUMERIC_VERSION="${NEW_VERSION%%-*}"
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -46,12 +40,12 @@ echo "[2/3] core/Cargo.toml  -> $NEW_VERSION"
 
 # The iOS app's marketing version. Anchored to the key's own line so the
 # CFBundleVersion build number just below it is left alone.
-awk -v v="$NUMERIC_VERSION" '
+awk -v v="$NEW_VERSION" '
     /^ *CFBundleShortVersionString: / { sub(/: .*/, ": " v) }
     { print }
 ' AnicatApple/project.yml > AnicatApple/project.yml.tmp && mv AnicatApple/project.yml.tmp AnicatApple/project.yml
-grep -q "CFBundleShortVersionString: $NUMERIC_VERSION" AnicatApple/project.yml || { echo "AnicatApple/project.yml was not updated" >&2; exit 1; }
-echo "[3/3] AnicatApple/project.yml  -> $NUMERIC_VERSION"
+grep -q "CFBundleShortVersionString: $NEW_VERSION" AnicatApple/project.yml || { echo "AnicatApple/project.yml was not updated" >&2; exit 1; }
+echo "[3/3] AnicatApple/project.yml  -> $NEW_VERSION"
 
 # Cargo records the crate version in the lock file too.
 (cd core && cargo update -p anicat-core --offline >/dev/null 2>&1 || cargo update -p anicat-core >/dev/null)

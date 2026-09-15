@@ -109,24 +109,24 @@ was a different program that happened to share the name. Start with the newest
 release; installing it replaces an older one in place, with nothing to
 uninstall first.
 
-### Test builds
+### Nightly builds
 
-New versions go out as test builds before they become the regular release.
-They have the newest features and fixes, and they have not been used for long,
-so expect bugs. If you would like to help find them, install the test line
-instead:
+Every night the development branch has new changes, they are built and
+published as the **nightly**. It has the newest features and fixes and nobody
+has tested it yet, so expect bugs. If you would like to help find them, install
+the nightly instead:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash -s -- --beta
+curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash -s -- --nightly
 ```
 
-A test build's version ends in `-beta` followed by a number (Anicat > About
-Anicat shows it). It tells you when a newer test build or a regular release is
-out, and running the regular command above at any time moves you back to the
-regular release. Please report what you find with the
+A nightly's version ends in `-nightly` and a timestamp (Anicat > About Anicat
+shows it). It tells you when a newer nightly or a stable release is out, and
+running the regular command above at any time moves you back to the stable
+release. Please report what you find with the
 [Bug report](https://github.com/bonkedbythonk/anicat/issues/new/choose)
-template, including the version and the log it asks for. Test builds are the
-ones marked Pre-release on the
+template, including the version and the log it asks for. The nightly is the
+release marked Pre-release on the
 [Releases page](https://github.com/bonkedbythonk/anicat/releases).
 
 ---

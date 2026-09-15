@@ -1,0 +1,137 @@
+name: Nightly
+
+# Builds native-swift into one rolling pre-release under the tag `nightly`,
+# with the asset always named Anicat-nightly-macos-arm64.zip. Both names are
+# fixed on purpose: `install_macos.sh --nightly` downloads that URL directly,
+# with no API call to be rate-limited. Stable installs never see it, because
+# /releases/latest skips pre-releases.
+
+on:
+  schedule:
+    # 03:00 UTC. Scheduled workflows run from the default branch (master),
+    # which is why the checkout below names native-swift explicitly.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even when native-swift has not moved since the last nightly
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: Build and publish nightly
+    # Same image as CI's Swift job; see the comment there on why not macos-15.
+    runs-on: macos-26
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Without the proxy baked into Info.plist, Films and TV silently
+      # disappears from the sidebar (both 6.0.0 bundles shipped that way).
+      ANICAT_TMDB_PROXY: https://anicat-tmdb.anicat.workers.dev
+      # Ad-hoc: the runner has no identity, and the package script must not
+      # go looking for one.
+      ANICAT_CODESIGN_IDENTITY: "-"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: native-swift
+          fetch-depth: 0
+
+      # A night with no commits would otherwise spend a macOS runner rebuilding
+      # the same binary and re-notify every nightly install of a "new" version.
+      - name: Skip when nothing changed
+        id: changed
+        run: |
+          head="$(git rev-parse HEAD)"
+          last="$(git rev-parse -q --verify 'refs/tags/nightly^{commit}' || true)"
+          if [ "$head" = "$last" ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "native-swift is still at $head, the last nightly; nothing to build."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "last=$last" >> "$GITHUB_OUTPUT"
+          fi
+
+      # X.Y.(Z+1)-nightly.<UTC yyyyMMddHHmm>: version.txt holds the last stable
+      # release, so the patch bump makes a nightly newer than that release and
+      # older than whatever ships next, and the timestamp orders nightlies.
+      - name: Version
+        if: steps.changed.outputs.build == 'true'
+        id: version
+        run: |
+          base="$(tr -d '[:space:]' < version.txt)"
+          IFS=. read -r major minor patch <<< "$base"
+          version="$major.$minor.$((patch + 1))-nightly.$(date -u +%Y%m%d%H%M)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Nightly version $version"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.changed.outputs.build == 'true'
+        with:
+          targets: aarch64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: swatinem/rust-cache@v2
+        if: steps.changed.outputs.build == 'true'
+        with:
+          workspaces: core -> target
+
+      - name: Build xcframework
+        if: steps.changed.outputs.build == 'true'
+        run: bash scripts/build-xcframework.sh
+
+      - name: Package
+        if: steps.changed.outputs.build == 'true'
+        env:
+          ANICAT_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bash scripts/package-anicat-macos-app.sh release zip
+          mv "AnicatApple/dist/Anicat-${ANICAT_VERSION}-macos-arm64.zip" AnicatApple/dist/Anicat-nightly-macos-arm64.zip
+
+      - name: Publish
+        if: steps.changed.outputs.build == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          LAST: ${{ steps.changed.outputs.last }}
+        run: |
+          notes="$(mktemp)"
+          {
+            echo "**Nightly build, not tested before release.** Built automatically from"
+            echo "\`native-swift\` at $(git rev-parse --short HEAD). Expect bugs, and please report"
+            echo "them with the Bug report template, including the version (Anicat > About"
+            echo "Anicat): https://github.com/${GITHUB_REPOSITORY}/issues/new/choose"
+            echo
+            echo "### Install"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/scripts/install_macos.sh | bash -s -- --nightly"
+            echo '```'
+            echo
+            echo "The same command without \`--nightly\` goes back to the stable release."
+            echo
+            echo "### Since the previous nightly"
+            echo
+            if [ -n "$LAST" ]; then
+              git log --no-merges --pretty='- %s' "$LAST..HEAD" | head -50
+            else
+              git log --no-merges --pretty='- %s' -20
+            fi
+          } > "$notes"
+
+          # Delete and recreate rather than edit: the release date then says
+          # when this build was made, and the tag moves to the built commit.
+          gh release delete nightly --cleanup-tag --yes 2>/dev/null || true
+          git tag -f nightly HEAD
+          git push -f origin refs/tags/nightly
+          gh release create nightly AnicatApple/dist/Anicat-nightly-macos-arm64.zip \
+            --title "Anicat $VERSION" \
+            --notes-file "$notes" \
+            --prerelease \
+            --latest=false \
+            --verify-tag

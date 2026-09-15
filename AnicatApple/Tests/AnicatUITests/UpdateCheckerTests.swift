@@ -42,20 +42,21 @@ struct UpdateCheckerTests {
         #expect(UpdateChecker.isNewer("6.1.0", than: "6.0.0+dirty"))
     }
 
-    @Test("A pre-release ranks below its release and above the one before")
+    @Test("A nightly ranks above the release before it and below its own")
     func prereleaseOrdering() {
-        #expect(UpdateChecker.isNewer("6.1.0", than: "6.1.0-beta.2"))
-        #expect(!UpdateChecker.isNewer("6.1.0-beta.2", than: "6.1.0"))
-        #expect(UpdateChecker.isNewer("6.1.0-beta.1", than: "6.0.1"))
-        #expect(UpdateChecker.isNewer("6.1.0-beta.2", than: "6.1.0-beta.1"))
-        #expect(UpdateChecker.isNewer("6.1.0-beta.10", than: "6.1.0-beta.9"))
-        #expect(!UpdateChecker.isNewer("6.1.0-beta.1", than: "6.1.0-beta.1"))
-        #expect(UpdateChecker.isNewer("6.1.0-beta.1", than: "6.1.0-beta"))
+        // nightly.yml stamps X.Y.(Z+1)-nightly.<yyyyMMddHHmm> off version.txt.
+        #expect(UpdateChecker.isNewer("6.0.2-nightly.202609150300", than: "6.0.1"))
+        #expect(UpdateChecker.isNewer("6.0.2", than: "6.0.2-nightly.202609150300"))
+        #expect(UpdateChecker.isNewer("6.1.0", than: "6.0.2-nightly.202609150300"))
+        #expect(!UpdateChecker.isNewer("6.0.2-nightly.202609150300", than: "6.0.2"))
+        #expect(UpdateChecker.isNewer("6.0.2-nightly.202609160300", than: "6.0.2-nightly.202609150300"))
+        #expect(!UpdateChecker.isNewer("6.0.2-nightly.202609150300", than: "6.0.2-nightly.202609150300"))
+        #expect(UpdateChecker.isNewer("6.0.2-beta.10", than: "6.0.2-beta.9"))
     }
 
     @Test("Only a dash before the metadata marks a pre-release")
     func prereleaseDetection() {
-        #expect(UpdateChecker.isPrerelease("6.1.0-beta.1"))
+        #expect(UpdateChecker.isPrerelease("6.0.2-nightly.202609150300"))
         #expect(!UpdateChecker.isPrerelease("6.1.0"))
         #expect(!UpdateChecker.isPrerelease("6.1.0+dirty-tree"))
     }

@@ -19,9 +19,10 @@ fixable:
   refuses requests from signed-out users. Check
   [AniList's status](https://anilist.co) before reporting.
 
-Reports from [test builds](README.md#test-builds) are especially welcome:
-they are how bugs get caught before a version reaches everyone. A test build's
-version ends in `-beta.N`; put the whole thing in the report.
+Reports from the [nightly build](README.md#nightly-builds) are especially
+welcome: they are how bugs get caught before a version reaches everyone. A
+nightly's version ends in `-nightly.` and a timestamp; put the whole thing in
+the report.
 
 Security problems do not go in public issues; see [SECURITY.md](SECURITY.md).
 

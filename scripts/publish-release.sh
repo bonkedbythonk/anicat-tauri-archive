@@ -6,11 +6,6 @@
 #   bash scripts/publish-release.sh            # draft release
 #   bash scripts/publish-release.sh --publish  # public release
 #
-# A version with a -beta.N suffix (scripts/bump-version.sh 6.1.0-beta.1) is
-# published as a GitHub pre-release: /releases/latest skips it, so neither the
-# default installer nor a stable build's update check ever offers it. Testers
-# opt in with the installer's --beta flag.
-#
 # The bundle is ad-hoc signed and not notarized, so the notes carry the
 # Privacy & Security unblock instructions. Not right-click-Open: macOS Sequoia
 # removed that shortcut for exactly this class of app, and the advice sends
@@ -33,9 +28,6 @@ ASSETS=("$ZIP" "$DMG")
 [ -f "$IPA" ] && ASSETS+=("$IPA")
 DRAFT="--draft"
 [ "${1:-}" = "--publish" ] && DRAFT=""
-PRERELEASE=""
-BETA=""
-case "$VERSION" in *-*) PRERELEASE="--prerelease"; BETA=1 ;; esac
 
 if git -C "$ROOT" rev-parse "$TAG" >/dev/null 2>&1; then
     echo "publish-release: tag $TAG already exists; bump version.txt first (scripts/bump-version.sh)" >&2
@@ -74,22 +66,12 @@ if [ -f "$ROOT/RELEASE_NOTES.md" ]; then
 else
     # --match 'v*': the newest tag by topology is `legacy/tauri`, so a bare
     # describe made the generated notes span the entire Swift rewrite.
-    # A stable release also skips the test tags, or 6.1.0's notes would list
-    # only what changed since its last beta.
-    EXCLUDE=()
-    [ -z "$BETA" ] && EXCLUDE=(--exclude 'v*-*')
-    PREV="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v*' ${EXCLUDE[@]+"${EXCLUDE[@]}"} 2>/dev/null || true)"
+    PREV="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
     {
         echo "## Anicat $VERSION"
         echo
         echo "Native macOS build (Apple silicon, macOS 15 or later)."
         echo
-        if [ -n "$BETA" ]; then
-            echo "**This is a test build.** It carries changes that have not been used"
-            echo "for long, so expect bugs, and please report them with the Bug report"
-            echo "template: https://github.com/bonkedbythonk/anicat/issues/new/choose"
-            echo
-        fi
         echo "### Changes"
         echo
         if [ -n "$PREV" ]; then
@@ -111,13 +93,7 @@ fi
     # ran the installer as a command substitution and then tried to execute
     # its output ("zsh: command not found: Step"). 6.0.0 and 6.0.1 shipped so.
     echo '```bash'
-    if [ -n "$BETA" ]; then
-        # Without --beta the installer resolves /releases/latest, which is the
-        # stable release, and a tester pasting this would get the wrong build.
-        echo 'curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash -s -- --beta'
-    else
-        echo 'curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash'
-    fi
+    echo 'curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash'
     echo '```'
     echo
     echo "By hand: open the .dmg and drag Anicat to Applications (the .zip holds"
@@ -134,6 +110,6 @@ fi
 
 git -C "$ROOT" tag -a "$TAG" -m "Anicat $VERSION"
 git -C "$ROOT" push origin "$TAG"
-gh release create "$TAG" "${ASSETS[@]}" --title "Anicat $VERSION" --notes-file "$NOTES" $DRAFT $PRERELEASE
+gh release create "$TAG" "${ASSETS[@]}" --title "Anicat $VERSION" --notes-file "$NOTES" $DRAFT
 rm -f "$NOTES"
 echo "publish-release: $TAG ${DRAFT:+(draft) }created"

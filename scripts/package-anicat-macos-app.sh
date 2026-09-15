@@ -10,7 +10,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="$(tr -d '[:space:]' < "$ROOT/version.txt")"
+# ANICAT_VERSION overrides version.txt for a build that is not a release: the
+# nightly workflow stamps X.Y.(Z+1)-nightly.<UTC timestamp> so a nightly ranks
+# above the stable release it follows and below the next one.
+VERSION="${ANICAT_VERSION:-$(tr -d '[:space:]' < "$ROOT/version.txt")}"
 # Which commit the bundle was built from, shown under Settings > Maintenance.
 # Two installs in one afternoon carried the same 6.0.0 and nobody could tell
 # which fixes a running copy had.
@@ -59,8 +62,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>Anicat</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
-    <!-- The full version, -beta.N included, so About, the log header and a
-         copied bug report all say a test build is one. CFBundleVersion stays
+    <!-- The full version, -nightly.N included, so About, the log header and
+         a copied bug report all say a nightly is one. CFBundleVersion stays
          numeric: LaunchServices orders bundles by it. -->
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>

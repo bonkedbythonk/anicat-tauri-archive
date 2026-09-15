@@ -27,11 +27,12 @@ public enum UpdateChecker {
     }
 
     /// Drafts and pre-releases are excluded by `/releases/latest` itself,
-    /// which is why `publish-release.sh` may create drafts and test builds
-    /// freely without every stable install being told about them.
+    /// which is why `publish-release.sh` may create drafts, and the nightly
+    /// workflow may replace its pre-release every night, without every stable
+    /// install being told about them.
     static let endpoint = URL(string: "https://api.github.com/repos/bonkedbythonk/anicat/releases/latest")!
-    /// The test line's view: every published release, pre-releases included,
-    /// newest first. Read only by a build that is itself a pre-release.
+    /// The nightly's view: every published release, pre-releases included.
+    /// Read only by a build that is itself a pre-release.
     static let listEndpoint = URL(string: "https://api.github.com/repos/bonkedbythonk/anicat/releases?per_page=20")!
 
     /// Not checked more than once a day. A launch is not a reason to spend a
@@ -77,10 +78,10 @@ public enum UpdateChecker {
     /// nobody would have been told about it. Missing components count as
     /// zero, so "6.1" and "6.1.0" are the same version.
     ///
-    /// A `-beta.N` suffix is a pre-release and ranks below the same version
-    /// without one, as in semver. Stripping it like build metadata made
-    /// "6.1.0-beta.2" equal to "6.1.0-beta.1", so a tester was never told
-    /// about the second beta, nor about 6.1.0 itself once it shipped.
+    /// A `-nightly.N` suffix is a pre-release and ranks below the same
+    /// version without one, as in semver. Stripping it like build metadata
+    /// made every nightly of a version equal, so a nightly install was never
+    /// told about the next one, nor about that version once it shipped.
     public static func isNewer(_ candidate: String, than current: String) -> Bool {
         func split(_ s: String) -> (core: [Int], pre: [Substring]) {
             // Anything after a `+` is build metadata, not precedence.
@@ -109,8 +110,8 @@ public enum UpdateChecker {
     }
 
     /// Whether this build is a pre-release, i.e. its version carries a `-`
-    /// suffix. Such a build was installed on purpose from the test line and
-    /// is offered newer test builds as well as stable ones.
+    /// suffix. Such a build was installed on purpose from the nightly and is
+    /// offered newer nightlies as well as stable releases.
     static func isPrerelease(_ version: String) -> Bool {
         (version.split(separator: "+", maxSplits: 1).first ?? "").contains("-")
     }
@@ -140,13 +141,26 @@ public enum UpdateChecker {
             guard let tag = json["tag_name"] as? String,
                   let page = (json["html_url"] as? String).flatMap(URL.init(string:))
             else { return nil }
-            let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            // The nightly lives under the fixed tag `nightly` so the installer
+            // has a stable URL; its version is only in the title, which
+            // nightly.yml writes as "Anicat <version>". Read as a tag, it
+            // parsed as version 0 and no nightly was ever newer than anything.
+            let version: String
+            if tag.hasPrefix("v") {
+                version = String(tag.dropFirst())
+            } else if let name = json["name"] as? String,
+                      let last = name.split(separator: " ").last,
+                      last.first?.isNumber == true {
+                version = String(last)
+            } else {
+                return nil
+            }
             let notes = (json["body"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             return Release(version: version, pageURL: page, notes: notes)
         }
         // Highest version, not the first in the list: GitHub orders by
-        // creation date, and a stable patch cut after a beta of the next
-        // minor would otherwise hide that beta from its own testers.
+        // creation date, and the nightly is recreated every night, so it
+        // would sit on top even after a newer stable release shipped.
         return releases.max { isNewer($1.version, than: $0.version) }
     }
 

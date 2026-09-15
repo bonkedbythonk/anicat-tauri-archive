@@ -7,20 +7,19 @@ set -e
 #
 #   curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash
 #
-# The test line -- builds published as GitHub pre-releases, newer than the
-# stable release and less used -- is opt-in:
+# The nightly -- rebuilt from the development branch each night it has new
+# commits, and not tested before it goes out -- is opt-in:
 #
-#   curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash -s -- --beta
+#   curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash -s -- --nightly
 #
-# --beta installs the newest release of either kind, so once a stable version
-# overtakes the last test build a tester is moved onto it.
+# Running the plain command again moves a nightly install back to stable.
 
 REPO="bonkedbythonk/anicat"
-BETA=""
+NIGHTLY=""
 for arg in "$@"; do
     case "$arg" in
-        --beta) BETA=1 ;;
-        *) echo "Unknown option: $arg (the only option is --beta)" >&2; exit 1 ;;
+        --nightly) NIGHTLY=1 ;;
+        *) echo "Unknown option: $arg (the only option is --nightly)" >&2; exit 1 ;;
     esac
 done
 APP_NAME="Anicat.app"
@@ -50,52 +49,39 @@ if [ ! -w "$(dirname "$INSTALL_PATH")" ]; then
     echo "/Applications is not writable by this account; installing to $INSTALL_PATH instead."
 fi
 
-if [ -n "$BETA" ]; then
-    echo "Step 1: Finding the latest test build..."
+if [ -n "$NIGHTLY" ]; then
+    # One rolling pre-release under a fixed tag with a fixed asset name
+    # (.github/workflows/nightly.yml), so the URL is known without asking the
+    # API, and the API's rate limit cannot get in the way.
+    echo "Step 1: Using the nightly build..."
+    DOWNLOAD_URL="https://github.com/$REPO/releases/download/nightly/Anicat-nightly-macos-arm64.zip"
 else
     echo "Step 1: Finding the latest version..."
-fi
-# Deliberately no python3 here. A stock macOS has no usable interpreter --
-# /usr/bin/python3 is a stub that prompts for a multi-GB Xcode Command Line
-# Tools install -- and this script has to work on a machine with nothing but
-# Terminal. /releases/latest already excludes drafts and prereleases, so the
-# asset URL can be pulled straight out with grep. Everything else this script
-# uses (curl, ditto, xattr, osascript) ships with the base system.
-if [ -n "$BETA" ]; then
-    # The list endpoint, newest first, pre-releases included; the API leaves
-    # drafts out of it for an unauthenticated caller. The first zip in it is
-    # the most recently published build of either kind.
-    RELEASES_API="https://api.github.com/repos/$REPO/releases?per_page=10"
-else
-    RELEASES_API="https://api.github.com/repos/$REPO/releases/latest"
-fi
-DOWNLOAD_URL=$(curl -sSL "$RELEASES_API" \
-    | grep -o "https://github.com/$REPO/releases/download/[^\"]*macos-arm64\.zip" \
-    | head -n 1)
+    # Deliberately no python3 here. A stock macOS has no usable interpreter --
+    # /usr/bin/python3 is a stub that prompts for a multi-GB Xcode Command Line
+    # Tools install -- and this script has to work on a machine with nothing but
+    # Terminal. /releases/latest already excludes drafts and prereleases, so the
+    # asset URL can be pulled straight out with grep. Everything else this script
+    # uses (curl, ditto, xattr, osascript) ships with the base system.
+    DOWNLOAD_URL=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" \
+        | grep -o "https://github.com/$REPO/releases/download/[^\"]*macos-arm64\.zip" \
+        | head -n 1)
 
-if [ -z "$DOWNLOAD_URL" ]; then
-    # The API allows 60 anonymous requests an hour per public IP, shared by
-    # everyone behind the same NAT (a campus, an office, a CGNAT carrier), and
-    # a rate-limited answer is a JSON error with no asset in it. The web
-    # redirect for /releases/latest has no such limit and names the tag, and
-    # publish-release.sh names the asset from the version, so the URL can be
-    # rebuilt from the tag alone.
-    if [ -n "$BETA" ]; then
-        # /releases/latest never names a pre-release. The Atom feed lists
-        # every published release newest first and is not rate-limited.
-        TAG="$(curl -sSL "https://github.com/$REPO/releases.atom" \
-            | grep -o '/releases/tag/v[0-9][^"<[:space:]]*' \
-            | sed 's|/releases/tag/||' \
-            | head -n 1)"
-    else
+    if [ -z "$DOWNLOAD_URL" ]; then
+        # The API allows 60 anonymous requests an hour per public IP, shared by
+        # everyone behind the same NAT (a campus, an office, a CGNAT carrier), and
+        # a rate-limited answer is a JSON error with no asset in it. The web
+        # redirect for /releases/latest has no such limit and names the tag, and
+        # publish-release.sh names the asset from the version, so the URL can be
+        # rebuilt from the tag alone.
         TAG="$(curl -sSI "https://github.com/$REPO/releases/latest" \
             | grep -i '^location:' \
             | grep -o '/releases/tag/v[0-9][^[:space:]]*' \
             | sed 's|/releases/tag/||' \
             | head -n 1)"
-    fi
-    if [ -n "$TAG" ]; then
-        DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/Anicat-${TAG#v}-macos-arm64.zip"
+        if [ -n "$TAG" ]; then
+            DOWNLOAD_URL="https://github.com/$REPO/releases/download/$TAG/Anicat-${TAG#v}-macos-arm64.zip"
+        fi
     fi
 fi
 
@@ -111,10 +97,12 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 TMP_ZIP="$TMP_DIR/anicat.zip"
 
 echo "Step 2: Downloading... (this might take a minute)"
+# -f: without it a 404 (no nightly published yet) is saved as the zip and
+# only surfaces later as "the archive did not contain Anicat.app".
 if [ -t 2 ]; then
-    curl -L -o "$TMP_ZIP" "$DOWNLOAD_URL" --progress-bar
+    curl -fL -o "$TMP_ZIP" "$DOWNLOAD_URL" --progress-bar
 else
-    curl -L -sS -o "$TMP_ZIP" "$DOWNLOAD_URL"
+    curl -fL -sS -o "$TMP_ZIP" "$DOWNLOAD_URL"
 fi
 
 echo "Step 3: Installing..."

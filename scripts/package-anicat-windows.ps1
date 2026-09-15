@@ -99,6 +99,16 @@ if (-not $env:ANICAT_TMDB_PROXY) {
 
 # --- Build -------------------------------------------------------------------
 
+# aws-lc-sys assembles its x86_64 code with NASM, and a build with no `nasm`
+# on PATH failed at "NASM command not found" after three minutes of
+# compiling. The NASM installer does not add itself to PATH, and a shell
+# opened before setup-windows-dev.ps1 changed PATH never sees it either. The
+# crate ships the assembled objects; use those rather than fail.
+if (-not (Get-Command nasm -ErrorAction SilentlyContinue) -and -not $env:AWS_LC_SYS_PREBUILT_NASM) {
+    Write-Host "    nasm not on PATH; using aws-lc-sys's prebuilt NASM objects"
+    $env:AWS_LC_SYS_PREBUILT_NASM = '1'
+}
+
 Write-Host "==> cargo build --release --locked (Anicat $Version)"
 Push-Location $ServerDir
 try {

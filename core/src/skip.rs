@@ -274,7 +274,7 @@ pub fn find_reference(reference: &[u32], target: &[u32], offset: f64) -> Option<
 /// Reads raw mono s16le PCM as mpv's `ao=pcm` writes it with no header.
 pub fn read_pcm(path: &std::path::Path) -> Result<Vec<i16>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    Ok(bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect())
+    Ok(bytes.as_chunks::<2>().0.iter().map(|c| i16::from_le_bytes(*c)).collect())
 }
 
 pub fn prints_to_bytes(prints: &[u32]) -> Vec<u8> {
@@ -282,7 +282,7 @@ pub fn prints_to_bytes(prints: &[u32]) -> Vec<u8> {
 }
 
 pub fn prints_from_bytes(bytes: &[u8]) -> Vec<u32> {
-    bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c)).collect()
 }
 
 #[cfg(test)]

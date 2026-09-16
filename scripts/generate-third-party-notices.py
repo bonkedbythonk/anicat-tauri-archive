@@ -252,6 +252,16 @@ NATIVE = [
 # library's git head at build time and record no per-library version, hence
 # the archive's build date where a version would go.
 _WIN_BUILD = "(shinchiro build of 2025-12-25)"
+# Shipped as plain files in the Windows zip's mpv\ folder rather than linked
+# into anything: the on-screen controller the player loads, and the icon font
+# it draws its buttons with. Anime4K is listed by anime4k_notice() with the
+# Mac app's copy of the same shaders, which is where the Windows zip takes
+# them from.
+WINDOWS_SCRIPTS = [
+    {"name": 'ModernZ (mpv on-screen controller, modified for Anicat)', "version": '0.3.3', "license": 'LGPL-2.1-or-later (a derivative of mpv\'s osc.lua by way of mpv-osc-modern, ModernX and its forks)', "source": ['https://github.com/Samillion/ModernZ'], "texts": []},
+    {"name": 'Fluent UI System Icons (the icon font ModernZ draws its buttons with)', "version": '(bundled with ModernZ 0.3.3)', "license": 'MIT', "source": ['https://github.com/microsoft/fluentui-system-icons'], "texts": ['fluentui-system-icons-LICENSE.txt']},
+]
+
 WINDOWS_NATIVE = [
     {"name": 'mpv', "version": "0.41.0", "license": 'GPL-2.0-or-later (built with gpl); linked with the FFmpeg below, the executable as a whole is GPL-3.0-or-later', "source": ['https://github.com/mpv-player/mpv/tree/v0.41.0', 'https://github.com/shinchiro/mpv-winbuild-cmake'], "texts": ['mpv-Copyright.txt']},
     {"name": 'FFmpeg', "version": _WIN_BUILD, "license": 'GPL-3.0-or-later (built with --enable-gpl --enable-version3)', "source": ['https://github.com/FFmpeg/FFmpeg', 'https://github.com/shinchiro/mpv-winbuild-cmake/blob/master/packages/ffmpeg.cmake'], "texts": ['FFmpeg-LICENSE.md']},
@@ -531,6 +541,10 @@ tracker applies if any of that becomes unavailable.""")
 
     add("\n\n" + rule("5. mpv.exe (Windows zip only, shinchiro build of mpv 0.41.0)"))
     for lib in WINDOWS_NATIVE:
+        add_library(add, lib)
+
+    add("\n\n" + rule("5b. mpv scripts and fonts (Windows zip only)"))
+    for lib in WINDOWS_SCRIPTS:
         add_library(add, lib)
 
     add("\n\n" + rule("6. Full license texts"))

@@ -1,6 +1,8 @@
 //! One running mpv and everything that happens while it plays: the IO half
-//! of the player loop. The decisions are `policy::Tracker`'s.
+//! of the player loop. The decisions are `policy::Tracker`'s and
+//! `upscale::decide`'s.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,8 +13,11 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use super::aniskip::{self, Segment};
 use super::ipc::{self, IpcClient};
 use super::policy::{self, Tracker};
+use super::prefs::{Prefs, PrefsStore};
+use super::upscale::{self, Decision};
 use super::{mpv, PlayRequest, Snapshot};
 use crate::writer::Writer;
 
@@ -21,12 +26,28 @@ use crate::writer::Writer;
 /// leave the stop request, and the tray's Quit, hanging.
 const QUIT_GRACE: Duration = Duration::from_secs(3);
 
+/// What the keys and skin buttons in mpv send. mpv delivers every
+/// `script-message` to every IPC client as a `client-message` event, so these
+/// reach the server with no HTTP and no port inside the Lua (the Tauri script
+/// curled a hardcoded port, and every callback went to a stranger whenever
+/// something else held it). Each name has exactly one owner: `anicat.lua`
+/// registers none of these, or a toggle would flip twice.
+const MSG_TOGGLE_SHADERS: &str = "anicat-toggle-shaders";
+const MSG_TOGGLE_AUTOSKIP: &str = "anicat-toggle-autoskip";
+const MSG_TOGGLE_AUTO_NEXT: &str = "anicat-toggle-auto-next";
+const MSG_NEXT: &str = "anicat-next-episode";
+const MSG_PREVIOUS: &str = "anicat-previous-episode";
+const MSG_RELOAD: &str = "anicat-reload-episode";
+const MSG_TRANSLATION: &str = "anicat-toggle-translation";
+
 pub enum Cmd {
     Replace {
         url: String,
         request: PlayRequest,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// `prefs.json` changed from the page: re-read it and apply it.
+    Prefs,
     Quit,
 }
 
@@ -40,11 +61,23 @@ enum Internal {
         catalog: FfiCatalog,
         catalog_id: i64,
         list: Vec<(i64, bool)>,
+        mal_id: Option<i64>,
     },
     Preloaded {
         generation: u64,
         episode: i64,
         url: String,
+    },
+    SkipTimes {
+        generation: u64,
+        url: String,
+        segments: Vec<Segment>,
+    },
+    /// A next, previous, reload or sub/dub resolve finished.
+    Switched {
+        generation: u64,
+        request: PlayRequest,
+        result: Result<String, String>,
     },
 }
 
@@ -66,21 +99,47 @@ struct Session {
     prefer_dub: bool,
     internal_tx: mpsc::UnboundedSender<Internal>,
     writes: mpsc::UnboundedSender<Write>,
+    prefs: Arc<PrefsStore>,
+    http: reqwest::Client,
+    /// `<exe dir>/mpv/shaders`, when the bundled folder exists.
+    shader_dir: Option<PathBuf>,
+    /// The `glsl-shaders` value last sent. Writing the property rebuilds the
+    /// render graph even when the value is unchanged, and a rebuild stalls
+    /// audio for a moment (`set_shader_profile` in the Tauri main.lua).
+    applied_shaders: String,
+    /// The last decision whose off message was shown, so a binge of a TV
+    /// show does not repeat "live action" at every episode.
+    announced: Option<Decision>,
+    /// The playing file's video height, once mpv knows it.
+    height: Option<i64>,
+    /// `(catalog_id, mal_id)` from the detail fetch.
+    mal: Option<(i64, Option<i64>)>,
+    /// The generation AniSkip was last asked about.
+    skips_requested: Option<u64>,
+    /// A next, previous, reload or sub/dub resolve is running. A second
+    /// press would race it, and whichever answered last would win.
+    switching: bool,
 }
 
 pub async fn start(
     engine: Arc<AnicatEngine>,
     writer: Writer,
     snapshot: Arc<Mutex<Snapshot>>,
+    prefs: Arc<PrefsStore>,
+    http: reqwest::Client,
     url: String,
     request: PlayRequest,
 ) -> Result<Handle, String> {
     let binary = mpv::locate().ok_or_else(|| mpv::NOT_FOUND.to_string())?;
-    let endpoint = ipc::endpoint(&crate::config::data_dir());
+    let data_dir = crate::config::data_dir();
+    let endpoint = ipc::endpoint(&data_dir);
     remove_socket(&endpoint);
     let config_dir = mpv::bundled_config_dir();
     let user_config = mpv::user_config();
     let extra = mpv::extra_args();
+    // mpv does not create it, and with no directory it caches nothing.
+    let shader_cache = data_dir.join("mpv-shader-cache");
+    let shader_cache = std::fs::create_dir_all(&shader_cache).ok().map(|_| shader_cache);
     let media_title = media_title(&request);
     let args = mpv::args(&mpv::Launch {
         url: &url,
@@ -89,6 +148,7 @@ pub async fn start(
         ipc: &endpoint,
         config_dir: config_dir.as_deref(),
         user_config: user_config.as_deref(),
+        shader_cache: shader_cache.as_deref(),
         extra: &extra,
     });
     log::info!("[player] spawning {} {:?}", binary.display(), args);
@@ -113,19 +173,21 @@ pub async fn start(
             return Err(e);
         }
     };
-    for (id, name) in [(1, "time-pos"), (2, "duration"), (3, "pause"), (4, "playlist-pos")] {
+    for (id, name) in [(1, "time-pos"), (2, "duration"), (3, "pause"), (4, "playlist-pos"), (5, "height")] {
         if let Err(e) = ipc.command(json!(["observe_property", id, name])).await {
             log::warn!("[player] observe_property {name} failed: {e}");
         }
     }
 
     let mut tracker = Tracker::new(request.catalog, request.catalog_id, request.episode, url);
+    tracker.auto_next = prefs.get().auto_next;
     // A local stream can finish loading before the connect retry lands, and
     // its `file-loaded` went to nobody. `time-pos` only answers once a file
     // is loaded, so a success here stands in for the missed event; without
     // it the episode waited for a file that had already arrived and nothing
     // was ever recorded.
-    if ipc.command(json!(["get_property", "time-pos"])).await.is_ok() {
+    let loaded_at_connect = ipc.command(json!(["get_property", "time-pos"])).await.is_ok();
+    if loaded_at_connect {
         tracker.file_loaded(Instant::now());
     }
 
@@ -144,8 +206,22 @@ pub async fn start(
         prefer_dub: request.prefer_dub,
         internal_tx,
         writes: writes_tx,
+        prefs,
+        http,
+        shader_dir: config_dir.as_ref().map(|d| d.join("shaders")),
+        applied_shaders: String::new(),
+        announced: None,
+        height: None,
+        mal: None,
+        skips_requested: None,
+        switching: false,
     };
     session.fetch_episodes();
+    session.push_state().await;
+    session.reset_skip_times().await;
+    if loaded_at_connect {
+        session.on_file_loaded().await;
+    }
     session.publish();
 
     let join = tokio::spawn(async move {
@@ -172,6 +248,7 @@ pub async fn start(
                     Some(Cmd::Replace { url, request, reply }) => {
                         let _ = reply.send(session.replace(url, request).await);
                     }
+                    Some(Cmd::Prefs) => session.apply_prefs().await,
                     Some(Cmd::Quit) | None => {
                         cmds_open = false;
                         let ipc = session.ipc.clone();
@@ -196,7 +273,14 @@ pub async fn start(
 impl Session {
     async fn on_event(&mut self, ev: Value) {
         match ev.get("event").and_then(Value::as_str) {
-            Some("file-loaded") => self.tracker.file_loaded(Instant::now()),
+            Some("file-loaded") => {
+                self.tracker.file_loaded(Instant::now());
+                self.on_file_loaded().await;
+            }
+            Some("client-message") => {
+                let name = ev.get("args").and_then(|a| a.get(0)).and_then(Value::as_str).unwrap_or("");
+                self.on_message(name).await;
+            }
             Some("property-change") => {
                 let data = ev.get("data");
                 match ev.get("name").and_then(Value::as_str) {
@@ -206,7 +290,16 @@ impl Session {
                             self.perform(actions);
                         }
                     }
-                    Some("duration") => self.tracker.set_duration(data.and_then(Value::as_f64)),
+                    Some("duration") => {
+                        self.tracker.set_duration(data.and_then(Value::as_f64));
+                        self.maybe_fetch_skips();
+                    }
+                    // While awaiting a new file this is still the outgoing
+                    // file's; `on_file_loaded` asks for the new one.
+                    Some("height") if !self.tracker.awaiting_new_file() => {
+                        self.height = data.and_then(Value::as_i64).filter(|h| *h > 0);
+                        self.apply_shaders().await;
+                    }
                     Some("pause") => {
                         if let Some(p) = data.and_then(Value::as_bool) {
                             self.tracker.set_paused(p);
@@ -229,6 +322,8 @@ impl Session {
                             }
                             log::info!("[player] mpv advanced to episode {}", entry.episode);
                             self.claim_pin(entry.episode);
+                            self.height = None;
+                            self.reset_skip_times().await;
                         }
                     }
                     _ => {}
@@ -288,9 +383,11 @@ impl Session {
 
     async fn on_internal(&mut self, msg: Internal) {
         match msg {
-            Internal::Episodes { catalog, catalog_id, list } => {
+            Internal::Episodes { catalog, catalog_id, list, mal_id } => {
                 if self.tracker.catalog == catalog && self.tracker.catalog_id == catalog_id {
                     self.tracker.set_episodes(list);
+                    self.mal = Some((catalog_id, mal_id));
+                    self.maybe_fetch_skips();
                 }
             }
             Internal::Preloaded { generation, episode, url } => {
@@ -304,6 +401,31 @@ impl Session {
                     Err(e) => {
                         log::warn!("[player] mpv refused to append episode {episode}: {e}");
                         self.tracker.retract_append(episode);
+                    }
+                }
+            }
+            Internal::SkipTimes { generation, url, segments } => {
+                if generation != self.tracker.generation {
+                    return;
+                }
+                log::info!("[aniskip] {} segment(s) for episode {}", segments.len(), self.tracker.episode());
+                self.set_skip_times(&url, &segments).await;
+            }
+            Internal::Switched { generation, request, result } => {
+                self.switching = false;
+                if generation != self.tracker.generation {
+                    log::info!("[player] switch to episode {} landed after the episode changed; dropped", request.episode);
+                    return;
+                }
+                match result {
+                    Ok(url) => {
+                        if let Err(e) = self.replace(url, request).await {
+                            self.osd(&e, 4.0);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[player] could not switch to episode {}: {e}", request.episode);
+                        self.osd(&format!("Could not load episode {}: {e}", request.episode), 5.0);
                     }
                 }
             }
@@ -335,9 +457,15 @@ impl Session {
             .replace(request.catalog, request.catalog_id, request.episode, url);
         self.title = request.title;
         self.prefer_dub = request.prefer_dub;
+        self.height = None;
+        // A play from the page supersedes a key's switch still resolving.
+        self.switching = false;
         if title_changed {
+            self.mal = None;
             self.fetch_episodes();
         }
+        self.push_state().await;
+        self.reset_skip_times().await;
         self.publish();
         Ok(())
     }
@@ -380,10 +508,274 @@ impl Session {
             match detail {
                 Ok(d) => {
                     let list = d.episodes.iter().map(|e| (e.number as i64, e.is_aired)).collect();
-                    let _ = tx.send(Internal::Episodes { catalog, catalog_id, list });
+                    let _ = tx.send(Internal::Episodes { catalog, catalog_id, list, mal_id: d.mal_id });
                 }
                 Err(e) => log::warn!("[player] no episode list for {catalog:?}:{catalog_id}, no auto-next: {e}"),
             }
+        });
+    }
+
+    async fn on_file_loaded(&mut self) {
+        // A file the same height as the one before sends no property change,
+        // so the new file's is asked for rather than waited on.
+        self.height = self
+            .ipc
+            .command(json!(["get_property", "height"]))
+            .await
+            .ok()
+            .and_then(|v| v.as_i64())
+            .filter(|h| *h > 0);
+        self.apply_shaders().await;
+        self.maybe_fetch_skips();
+    }
+
+    async fn on_message(&mut self, name: &str) {
+        match name {
+            MSG_TOGGLE_SHADERS => {
+                let p = self.update_prefs(|p| p.upscaling = !p.upscaling).await;
+                self.osd(if p.upscaling { "Upscaling: Enabled" } else { "Upscaling: Disabled" }, 2.0);
+                self.apply_prefs().await;
+            }
+            MSG_TOGGLE_AUTOSKIP => {
+                let p = self.update_prefs(|p| p.autoskip = !p.autoskip).await;
+                self.osd(if p.autoskip { "Auto-skip intro: On" } else { "Auto-skip intro: Off" }, 1.5);
+                self.apply_prefs().await;
+            }
+            MSG_TOGGLE_AUTO_NEXT => {
+                let p = self.update_prefs(|p| p.auto_next = !p.auto_next).await;
+                self.osd(if p.auto_next { "Auto-play next: On" } else { "Auto-play next: Off" }, 1.5);
+                self.apply_prefs().await;
+            }
+            MSG_NEXT => self.next_episode().await,
+            MSG_PREVIOUS => match self.tracker.previous_episode() {
+                Some(ep) => self.switch(ep, self.prefer_dub, None, &format!("Loading episode {ep}...")).await,
+                None => self.osd("Already at the first episode.", 3.0),
+            },
+            MSG_RELOAD => {
+                let at = self.tracker.position;
+                self.switch(self.tracker.episode(), self.prefer_dub, at, "Reloading episode...").await;
+            }
+            MSG_TRANSLATION => {
+                if self.tracker.catalog != FfiCatalog::Anilist {
+                    self.osd("Sub and dub apply to anime only.", 2.0);
+                    return;
+                }
+                let dub = !self.prefer_dub;
+                let at = self.tracker.position;
+                let text = if dub { "Switching to dub..." } else { "Switching to sub..." };
+                self.switch(self.tracker.episode(), dub, at, text).await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn next_episode(&mut self) {
+        if self.tracker.catalog == FfiCatalog::TmdbMovie {
+            self.osd("Films have no next episode.", 2.0);
+            return;
+        }
+        // Already appended by the preload: mpv has the file, nothing to resolve.
+        if self.tracker.next_ready() {
+            if let Err(e) = self.ipc.command(json!(["playlist-next", "force"])).await {
+                log::warn!("[player] playlist-next failed: {e}");
+            }
+            return;
+        }
+        let next = match self.tracker.next_episode() {
+            Some(n) => Some(n),
+            // No list yet (a slow or failed detail fetch): the number after
+            // this one, and a resolve that finds nothing says so.
+            None if !self.tracker.has_episode_list() => Some(self.tracker.episode() + 1),
+            None => None,
+        };
+        match next {
+            Some(ep) => self.switch(ep, self.prefer_dub, None, &format!("Loading episode {ep}...")).await,
+            None => self.osd("Already at the last episode.", 3.0),
+        }
+    }
+
+    /// Resolves `episode` in the background and replaces the playing file
+    /// with it when it lands. `position` is where to start for a reload or a
+    /// sub/dub flip; `None` resumes from the registry, as a play from the page
+    /// does.
+    async fn switch(&mut self, episode: i64, prefer_dub: bool, position: Option<f64>, message: &str) {
+        if self.switching {
+            self.osd("Still loading. One moment.", 2.0);
+            return;
+        }
+        self.switching = true;
+        // Long, because a cold resolve can take most of a minute; the new
+        // file's own OSD replaces it the moment it opens.
+        self.osd(message, 30.0);
+        let (catalog, catalog_id, generation) = (self.tracker.catalog, self.tracker.catalog_id, self.tracker.generation);
+        let (engine, tx, title, known_duration) =
+            (self.engine.clone(), self.internal_tx.clone(), self.title.clone(), self.tracker.duration);
+        log::info!("[player] switching to {catalog:?}:{catalog_id} episode {episode} (dub {prefer_dub})");
+        tokio::spawn(async move {
+            let (start, duration) = match position {
+                Some(p) => (p.max(0.0).floor(), known_duration),
+                None => {
+                    let e = engine.clone();
+                    let recorded = tokio::task::spawn_blocking(move || e.get_progress(catalog, catalog_id, episode))
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                        .flatten();
+                    super::resume_point(recorded.as_ref())
+                }
+            };
+            let req = StreamRequest {
+                catalog,
+                catalog_id,
+                episode,
+                title: title.clone(),
+                prefer_dub,
+                chosen_name: None,
+                resume_fraction: super::resume_fraction(start, duration),
+                preload: false,
+            };
+            let result = engine.resolve_stream(req).await.map(|h| h.url).map_err(|e| e.to_string());
+            let request = PlayRequest {
+                catalog,
+                catalog_id,
+                episode,
+                title,
+                prefer_dub,
+                start_seconds: start,
+                duration_seconds: duration,
+            };
+            let _ = tx.send(Internal::Switched { generation, request, result });
+        });
+    }
+
+    async fn update_prefs(&self, f: impl FnOnce(&mut Prefs) + Send + 'static) -> Prefs {
+        let store = self.prefs.clone();
+        match tokio::task::spawn_blocking(move || store.update(f)).await {
+            Ok(p) => p,
+            Err(_) => self.prefs.get(),
+        }
+    }
+
+    /// Brings mpv and the tracker in line with `prefs.json`.
+    async fn apply_prefs(&mut self) {
+        let prefs = self.prefs.get();
+        self.tracker.auto_next = prefs.auto_next;
+        if !prefs.auto_next {
+            // mpv advances into an entry already appended on its own, at eof.
+            if let Some((index, episode)) = self.tracker.appended_index() {
+                match self.ipc.command(json!(["playlist-remove", index])).await {
+                    Ok(_) => self.tracker.retract_append(episode),
+                    Err(e) => log::warn!("[player] could not remove appended episode {episode}: {e}"),
+                }
+            }
+        }
+        self.apply_shaders().await;
+        self.push_state().await;
+        self.publish();
+    }
+
+    async fn apply_shaders(&mut self) {
+        let prefs = self.prefs.get();
+        let decision = upscale::decide(self.tracker.catalog, prefs.upscaling, self.height);
+        let wanted = match decision {
+            Decision::Pending => return,
+            Decision::On => match &self.shader_dir {
+                Some(dir) => upscale::shader_list(dir, upscale::PATH_LIST_SEP),
+                None => String::new(),
+            },
+            _ => String::new(),
+        };
+        if decision == Decision::On && wanted.is_empty() && self.announced != Some(decision) {
+            log::warn!("[player] upscaling is on but no Anime4K shaders were found in the bundled mpv folder");
+        }
+        if wanted != self.applied_shaders {
+            let cmd = if wanted.is_empty() {
+                json!(["change-list", "glsl-shaders", "clr", ""])
+            } else {
+                json!(["change-list", "glsl-shaders", "set", wanted])
+            };
+            match self.ipc.command(cmd).await {
+                Ok(_) => {
+                    log::info!("[player] Anime4K {decision:?}");
+                    self.applied_shaders = wanted;
+                }
+                Err(e) => log::warn!("[player] could not set glsl-shaders: {e}"),
+            }
+        }
+        if let Some(text) = decision.message().filter(|_| self.announced != Some(decision)) {
+            self.osd(text, 2.5);
+        }
+        self.announced = Some(decision);
+        self.set_user_data("upscaling-active", json!(!self.applied_shaders.is_empty())).await;
+    }
+
+    /// The state the skin's Anicat buttons and `anicat.lua` read.
+    async fn push_state(&self) {
+        let p = self.prefs.get();
+        self.set_user_data("upscaling", json!(p.upscaling)).await;
+        self.set_user_data("autoskip", json!(p.autoskip)).await;
+        self.set_user_data("auto-next", json!(p.auto_next)).await;
+        self.set_user_data("dub", json!(self.prefer_dub)).await;
+    }
+
+    async fn set_user_data(&self, key: &str, value: Value) {
+        let name = format!("user-data/anicat/{key}");
+        if let Err(e) = self.ipc.command(json!(["set_property", name, value])).await {
+            log::warn!("[player] could not set {name}: {e}");
+        }
+    }
+
+    /// Tagged with the URL they belong to, and `anicat.lua` ignores times
+    /// whose URL is not the file playing. mpv opens an appended episode
+    /// before this server hears `playlist-pos` move, and in that window the
+    /// previous episode's OP times would apply to the new file.
+    async fn set_skip_times(&self, url: &str, segments: &[Segment]) {
+        self.set_user_data("skip-times", json!({ "url": url, "segments": segments })).await;
+    }
+
+    async fn reset_skip_times(&self) {
+        let url = self.tracker.url().to_string();
+        self.set_skip_times(&url, &[]).await;
+    }
+
+    /// Once per episode, when the file is loaded, its duration is known and
+    /// the detail fetch has named a MAL id.
+    fn maybe_fetch_skips(&mut self) {
+        let generation = self.tracker.generation;
+        if self.tracker.catalog != FfiCatalog::Anilist
+            || self.skips_requested == Some(generation)
+            || self.tracker.awaiting_new_file()
+        {
+            return;
+        }
+        let Some(duration) = self.tracker.duration else { return };
+        let mal_id = match self.mal {
+            Some((id, mal)) if id == self.tracker.catalog_id => mal,
+            _ => return,
+        };
+        self.skips_requested = Some(generation);
+        let Some(mal_id) = mal_id else {
+            log::info!("[aniskip] no MAL id for AniList {}; chapters only", self.tracker.catalog_id);
+            return;
+        };
+        let (http, tx, episode, url) =
+            (self.http.clone(), self.internal_tx.clone(), self.tracker.episode(), self.tracker.url().to_string());
+        tokio::spawn(async move {
+            match aniskip::fetch(&http, mal_id, episode, duration).await {
+                Ok(segments) => {
+                    let _ = tx.send(Internal::SkipTimes { generation, url, segments });
+                }
+                Err(e) => log::warn!("[aniskip] MAL {mal_id} episode {episode}: {e}"),
+            }
+        });
+    }
+
+    /// Not awaited: an OSD line is not worth holding the event loop for.
+    fn osd(&self, text: &str, seconds: f64) {
+        let ipc = self.ipc.clone();
+        let cmd = json!(["show-text", text, (seconds * 1000.0) as i64]);
+        tokio::spawn(async move {
+            let _ = ipc.command(cmd).await;
         });
     }
 

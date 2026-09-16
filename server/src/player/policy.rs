@@ -79,6 +79,9 @@ pub struct Tracker {
     advance_fired: bool,
     /// `(number, is_aired)` in list order, once the detail fetch lands.
     episodes: Option<Vec<(i64, bool)>>,
+    /// The `auto_next` setting. Off means no preload either: a preload
+    /// spends the second download slot on an episode nobody will reach.
+    pub auto_next: bool,
 }
 
 impl Tracker {
@@ -100,6 +103,7 @@ impl Tracker {
             preload_fired: false,
             advance_fired: false,
             episodes: None,
+            auto_next: true,
         }
     }
 
@@ -107,12 +111,16 @@ impl Tracker {
         self.playlist[self.current].episode
     }
 
+    /// The URL of the entry mpv is playing.
+    pub fn url(&self) -> &str {
+        &self.playlist[self.current].url
+    }
+
     /// Whether the entry after the current one is already in mpv's playlist.
     pub fn next_ready(&self) -> bool {
         self.current + 1 < self.playlist.len()
     }
 
-    #[cfg(test)]
     pub fn awaiting_new_file(&self) -> bool {
         self.awaiting_new_file
     }
@@ -146,6 +154,10 @@ impl Tracker {
         self.advance_fired = false;
     }
 
+    pub fn has_episode_list(&self) -> bool {
+        self.episodes.is_some()
+    }
+
     pub fn set_episodes(&mut self, episodes: Vec<(i64, bool)>) {
         self.episodes = Some(episodes);
     }
@@ -162,11 +174,32 @@ impl Tracker {
         list.get(at + 1).filter(|(_, aired)| *aired).map(|(n, _)| *n)
     }
 
+    /// The episode before `current` in list order, for `anicat-previous-episode`.
+    /// Before the list arrives, the number below it.
+    pub fn previous_episode(&self) -> Option<i64> {
+        if self.catalog == FfiCatalog::TmdbMovie {
+            return None;
+        }
+        match self.episodes.as_ref() {
+            Some(list) => {
+                let at = list.iter().position(|(n, _)| *n == self.episode())?;
+                at.checked_sub(1).map(|i| list[i].0)
+            }
+            None => Some(self.episode() - 1).filter(|n| *n >= 1),
+        }
+    }
+
+    /// The index of the appended next entry in mpv's playlist, for removing
+    /// it when auto-next is turned off after the preload landed.
+    pub fn appended_index(&self) -> Option<(usize, i64)> {
+        self.next_ready().then(|| (self.current + 1, self.playlist[self.current + 1].episode))
+    }
+
     /// A preload finished. Appends it when it still belongs to the episode
     /// it was started for; returns whether the session should send the
     /// `loadfile append`.
     pub fn accept_preload(&mut self, generation: u64, episode: i64, url: String) -> bool {
-        if generation != self.generation || self.next_ready() || self.next_episode() != Some(episode) {
+        if generation != self.generation || !self.auto_next || self.next_ready() || self.next_episode() != Some(episode) {
             return false;
         }
         self.playlist.push(Entry { episode, url });
@@ -250,7 +283,7 @@ impl Tracker {
             self.watched_fired = true;
             actions.mark_watched = true;
         }
-        if completion_rules_apply && !self.preload_fired && percent >= NEXT_EPISODE_PRELOAD_PCT && !self.next_ready()
+        if completion_rules_apply && self.auto_next && !self.preload_fired && percent >= NEXT_EPISODE_PRELOAD_PCT && !self.next_ready()
         {
             // Not consumed while the episode list has not arrived: the flag
             // would otherwise be spent on a tick that had nothing to preload.
@@ -259,7 +292,7 @@ impl Tracker {
                 actions.preload = Some(next);
             }
         }
-        if completion_rules_apply && !self.advance_fired && self.next_ready() && duration - time <= AUTO_ADVANCE_REMAINING {
+        if completion_rules_apply && self.auto_next && !self.advance_fired && self.next_ready() && duration - time <= AUTO_ADVANCE_REMAINING {
             self.advance_fired = true;
             actions.advance = true;
         }
@@ -423,6 +456,32 @@ mod tests {
         assert!(!t.time_pos(1437.9, now).advance);
         assert!(t.time_pos(1438.0, now).advance);
         assert!(!t.time_pos(1439.0, now).advance);
+    }
+
+    #[test]
+    fn auto_next_off_neither_preloads_nor_advances() {
+        let mut t = tracker();
+        t.auto_next = false;
+        let now = loaded(&mut t);
+        assert_eq!(t.time_pos(1100.0, now).preload, None);
+        assert!(!t.accept_preload(t.generation, 2, "u2".into()));
+        t.auto_next = true;
+        assert_eq!(t.time_pos(1101.0, now).preload, Some(2));
+        assert!(t.accept_preload(t.generation, 2, "u2".into()));
+        assert_eq!(t.appended_index(), Some((1, 2)));
+        t.auto_next = false;
+        assert!(!t.time_pos(1439.0, now).advance);
+    }
+
+    #[test]
+    fn previous_episode_follows_the_list_or_counts_down() {
+        let mut t = Tracker::new(FfiCatalog::Anilist, 1, 3, "u".into());
+        assert_eq!(t.previous_episode(), Some(2));
+        t.set_episodes(vec![(0, true), (3, true)]);
+        assert_eq!(t.previous_episode(), Some(0));
+        let first = Tracker::new(FfiCatalog::Anilist, 1, 1, "u".into());
+        assert_eq!(first.previous_episode(), None);
+        assert_eq!(Tracker::new(FfiCatalog::TmdbMovie, 1, 1, "u".into()).previous_episode(), None);
     }
 
     #[test]

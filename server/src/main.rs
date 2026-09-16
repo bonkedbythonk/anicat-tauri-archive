@@ -116,12 +116,13 @@ fn main() {
         };
 
         let writer = Writer::spawn(engine.clone());
-        let player = Arc::new(Player::new(engine.clone(), writer.clone()));
         let http = reqwest::Client::builder()
             // GitHub's API refuses requests with no User-Agent.
             .user_agent(format!("Anicat-Server/{} (+https://github.com/bonkedbythonk/anicat)", version::current()))
             .build()
             .expect("reqwest client");
+        let prefs = Arc::new(player::prefs::PrefsStore::load(&data_dir));
+        let player = Arc::new(Player::new(engine.clone(), writer.clone(), prefs, http.clone()));
         let state = AppState {
             engine,
             writer,

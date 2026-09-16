@@ -36,8 +36,22 @@ pub fn locate() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// The `mpv` folder shipped beside the executable, holding our `mpv.conf`.
+/// The `mpv` folder shipped beside the executable: `mpv.conf`, `input.conf`,
+/// `scripts/`, `script-opts/`, `fonts/` and `shaders/`. mpv resolves `~~/`
+/// to `--config-dir`, and loads `~~/scripts`, `~~/script-opts`, `~~/fonts`
+/// and `~~/input.conf` from it, so pointing it here is what loads the skin.
+/// `ANICAT_MPV_CONFIG_DIR` overrides it: a `cargo run` binary sits in
+/// `target/debug/` with no `mpv` folder beside it, so without the override
+/// every development run is unskinned and nothing about the skin can be
+/// tested before packaging.
 pub fn bundled_config_dir() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("ANICAT_MPV_CONFIG_DIR") {
+        let p = PathBuf::from(p);
+        if p.is_dir() {
+            return Some(p);
+        }
+        log::warn!("[player] ANICAT_MPV_CONFIG_DIR={} is not a directory", p.display());
+    }
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join("mpv")))
@@ -60,6 +74,8 @@ pub struct Launch<'a> {
     pub ipc: &'a Path,
     pub config_dir: Option<&'a Path>,
     pub user_config: Option<&'a Path>,
+    /// Where compiled shaders are kept between launches.
+    pub shader_cache: Option<&'a Path>,
     /// `ANICAT_MPV_EXTRA_ARGS`, already split.
     pub extra: &'a [String],
 }
@@ -75,6 +91,14 @@ pub fn args(l: &Launch) -> Vec<String> {
         if let Some(user) = l.user_config {
             args.push(format!("--include={}", user.display()));
         }
+    }
+    // The data dir, not `~~cache/`: with `--config-dir` set that resolves
+    // inside the install folder, which an update replaces, and which is not
+    // writable for a per-machine install. Without a persistent cache the
+    // Anime4K chain is recompiled on every launch, a stall of seconds at the
+    // first frame of every play.
+    if let Some(dir) = l.shader_cache {
+        args.push(format!("--gpu-shader-cache-dir={}", dir.display()));
     }
     args.push(format!("--input-ipc-server={}", l.ipc.display()));
     args.push(format!("--force-media-title={}", l.media_title));
@@ -113,6 +137,7 @@ mod tests {
         let user = PathBuf::from("/home/u/.config/mpv/mpv.conf");
         let dir = PathBuf::from("/opt/anicat/mpv");
         let extra = vec!["--vo=null".to_string()];
+        let cache = PathBuf::from("/data/mpv-shader-cache");
         let mut l = Launch {
             url: "http://127.0.0.1:1/s",
             start_seconds: 612.4,
@@ -120,12 +145,14 @@ mod tests {
             ipc: &ipc,
             config_dir: Some(&dir),
             user_config: Some(&user),
+            shader_cache: Some(&cache),
             extra: &extra,
         };
         let a = args(&l);
         assert_eq!(a[0], "--config-dir=/opt/anicat/mpv");
         assert_eq!(a[1], "--include=/home/u/.config/mpv/mpv.conf");
         assert!(a.contains(&"--start=612".to_string()));
+        assert!(a.contains(&"--gpu-shader-cache-dir=/data/mpv-shader-cache".to_string()));
         assert_eq!(a[a.len() - 2], "--");
         assert_eq!(a[a.len() - 1], "http://127.0.0.1:1/s");
         assert!(a.iter().position(|x| x == "--vo=null") > a.iter().position(|x| x == "--idle=no"));

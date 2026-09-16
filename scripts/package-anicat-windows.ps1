@@ -8,6 +8,11 @@
 #   d3dcompiler_43.dll    carried beside mpv.exe by that build
 #   mpv\mpv.conf          ours (server\mpv\mpv.conf); the player passes this
 #                         folder to mpv as --config-dir
+#   mpv\input.conf        ours, the Ctrl+number / Shift+letter bindings
+#   mpv\scripts\          modernz.lua (the skin) and anicat.lua
+#   mpv\script-opts\      the skin's Anicat theme
+#   mpv\fonts\            the skin's icon font
+#   mpv\shaders\          Anime4K, from the Mac app's copy
 #   mpv\fonts.conf        from the mpv archive, same folder
 #   THIRD_PARTY_NOTICES.txt, README.txt, DISCLAIMER.md
 #
@@ -90,8 +95,17 @@ $SevenZip = Find-SevenZip
 if (-not $SevenZip) {
     Fail "7-Zip not found. The mpv build ships as a .7z; install it with 'winget install 7zip.7zip' and run this again."
 }
-$MpvConf = Join-Path $ServerDir 'mpv\mpv.conf'
+$MpvDir = Join-Path $ServerDir 'mpv'
+$MpvConf = Join-Path $MpvDir 'mpv.conf'
 if (-not (Test-Path $MpvConf)) { Fail "missing $MpvConf" }
+# The skin and the shaders are not decoration: without scripts\ there is no
+# on-screen controller at all (mpv.conf sets osc=no for it), and without
+# shaders\ every Anime4K toggle fails silently at the glsl-shaders write.
+foreach ($needed in @('input.conf', 'scripts\modernz.lua', 'scripts\anicat.lua', 'script-opts\modernz.conf')) {
+    if (-not (Test-Path (Join-Path $MpvDir $needed))) { Fail "missing $(Join-Path $MpvDir $needed)" }
+}
+$ShaderSrc = Join-Path $Root 'AnicatApple\Sources\AnicatUI\Resources\Shaders'
+if (-not (Test-Path $ShaderSrc)) { Fail "missing $ShaderSrc (the Anime4K shaders the player loads)" }
 if (-not (Test-Path $Notices)) { Fail "missing $Notices" }
 if (-not $env:ANICAT_TMDB_PROXY) {
     Write-Host 'package-anicat-windows: ANICAT_TMDB_PROXY is not set; this build will have no Films and TV.' -ForegroundColor Yellow
@@ -180,6 +194,18 @@ Remove-Item -Recurse -Force $MpvScratch
 
 Copy-Item -Force $Exe (Join-Path $Stage 'anicat.exe')
 Copy-Item -Force $MpvConf (Join-Path $Stage 'mpv\mpv.conf')
+Copy-Item -Force (Join-Path $MpvDir 'input.conf') (Join-Path $Stage 'mpv\input.conf')
+foreach ($folder in @('scripts', 'script-opts', 'fonts')) {
+    $source = Join-Path $MpvDir $folder
+    if (Test-Path $source) {
+        Copy-Item -Recurse -Force $source (Join-Path $Stage 'mpv')
+    }
+}
+# Only the .glsl files: the Mac's Shaders folder also carries a compiled
+# metallib folder for the SwiftUI shaders, which mpv has no use for.
+$ShaderDest = Join-Path $Stage 'mpv\shaders'
+New-Item -ItemType Directory -Force -Path $ShaderDest | Out-Null
+Copy-Item -Force (Join-Path $ShaderSrc '*.glsl') $ShaderDest
 # The committed file, not a fresh generation: it is what --check in
 # publish-release.sh holds the Mac release to, so both platforms of one tag
 # ship the same text.

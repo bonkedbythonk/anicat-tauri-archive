@@ -264,10 +264,6 @@ struct PlayBody {
     from_start: bool,
 }
 
-/// Past this fraction a recorded position replays from the start. Same 85%
-/// the watched mark uses; resuming at 23:40 of 24:00 put a rewatch into the
-/// credits and straight into auto-next (`AppModel.resolveAndPlay`).
-const REPLAY_FROM_START_FRACTION: f64 = 0.85;
 
 async fn play(State(s): State<AppState>, ApiJson(b): ApiJson<PlayBody>) -> ApiResult<Json<Value>> {
     let (mut start, mut duration) = (0.0_f64, None);
@@ -277,22 +273,9 @@ async fn play(State(s): State<AppState>, ApiJson(b): ApiJson<PlayBody>) -> ApiRe
         let recorded = tokio::task::spawn_blocking(move || engine.get_progress(catalog, id, ep))
             .await
             .map_err(|e| ApiError::internal(e.to_string()))??;
-        if let Some(p) = recorded.filter(|p| p.duration > 0) {
-            duration = Some(p.duration as f64);
-            let fraction = p.stop_time as f64 / p.duration as f64;
-            if fraction < REPLAY_FROM_START_FRACTION {
-                start = p.stop_time.max(0) as f64;
-            }
-        }
+        (start, duration) = crate::player::resume_point(recorded.as_ref());
     }
-    // Only from a recorded duration. It tells the pre-buffer gate which part
-    // of the file mpv's --start will read; without it the gate proves byte 0
-    // healthy and hands off to a resume seek on an unprioritized piece that
-    // stalls.
-    let resume_fraction = match duration {
-        Some(d) if start > 0.0 => Some(start / d),
-        _ => None,
-    };
+    let resume_fraction = crate::player::resume_fraction(start, duration);
     let req = StreamRequest {
         catalog: b.catalog,
         catalog_id: b.catalog_id,

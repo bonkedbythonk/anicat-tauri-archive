@@ -1,3 +1,27 @@
+> # This repository is the archive
+>
+> Anicat has moved to **[bonkedbythonk/anicat](https://github.com/bonkedbythonk/anicat)**,
+> where it starts again at 1.0.0 with the native app alone. Downloads, issues
+> and pull requests belong there; this one is read-only.
+>
+> What is kept here: 779 commits across the four programs that carried the name
+> -- a Python command-line tool, a FastAPI dashboard, a packaged desktop build,
+> and the Tauri app -- plus the native rewrite up to 6.0.1, and the releases from
+> v5.5.1 through v6.0.1. The last commit is `00109a3`.
+>
+> **The install instructions below are out of date.** Anicat 6.0.1 no longer
+> updates itself: it checks for versions higher than its own, and the new line
+> starts lower. Install the current version instead:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/bonkedbythonk/anicat/master/scripts/install_macos.sh | bash
+> ```
+>
+> Everything past this point is the README as it stood on 2026-09-16, left for
+> reference.
+
+---
+
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/branding/logo-dark.png">
